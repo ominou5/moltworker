@@ -39,30 +39,30 @@ mkdir -p "$CONFIG_DIR"
 should_restore_from_r2() {
     local R2_SYNC_FILE="$BACKUP_DIR/.last-sync"
     local LOCAL_SYNC_FILE="$CONFIG_DIR/.last-sync"
-    
+
     # If no R2 sync timestamp, don't restore
     if [ ! -f "$R2_SYNC_FILE" ]; then
         echo "No R2 sync timestamp found, skipping restore"
         return 1
     fi
-    
+
     # If no local sync timestamp, restore from R2
     if [ ! -f "$LOCAL_SYNC_FILE" ]; then
         echo "No local sync timestamp, will restore from R2"
         return 0
     fi
-    
+
     # Compare timestamps
     R2_TIME=$(cat "$R2_SYNC_FILE" 2>/dev/null)
     LOCAL_TIME=$(cat "$LOCAL_SYNC_FILE" 2>/dev/null)
-    
+
     echo "R2 last sync: $R2_TIME"
     echo "Local last sync: $LOCAL_TIME"
-    
+
     # Convert to epoch seconds for comparison
     R2_EPOCH=$(date -d "$R2_TIME" +%s 2>/dev/null || echo "0")
     LOCAL_EPOCH=$(date -d "$LOCAL_TIME" +%s 2>/dev/null || echo "0")
-    
+
     if [ "$R2_EPOCH" -gt "$LOCAL_EPOCH" ]; then
         echo "R2 backup is newer, will restore"
         return 0
@@ -131,8 +131,11 @@ else
 fi
 
 # ============================================================
-# UPDATE CONFIG FROM ENVIRONMENT VARIABLES
+# CONFIGURE FROM ENVIRONMENT VARIABLES
 # ============================================================
+# Apply any environment variable overrides to the config
+# This runs on every startup to ensure env vars take precedence
+
 node << EOFNODE
 const fs = require('fs');
 
@@ -212,13 +215,15 @@ if (process.env.SLACK_BOT_TOKEN && process.env.SLACK_APP_TOKEN) {
 // Usage: Set AI_GATEWAY_BASE_URL or ANTHROPIC_BASE_URL to your endpoint like:
 //   https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_id}/anthropic
 //   https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_id}/openai
+//   https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_id}/compat
 const baseUrl = (process.env.AI_GATEWAY_BASE_URL || process.env.ANTHROPIC_BASE_URL || '').replace(/\/+$/, '');
-const isOpenAI = baseUrl.endsWith('/openai');
+// Check for OpenAI-compatible endpoints: /openai or /compat (unified API)
+const isOpenAI = baseUrl.endsWith('/openai') || baseUrl.endsWith('/compat');
 
 if (isOpenAI) {
     // Create custom openai provider config with baseUrl override
     // Omit apiKey so moltbot falls back to OPENAI_API_KEY env var
-    console.log('Configuring OpenAI provider with base URL:', baseUrl);
+    console.log('Configuring OpenAI-compatible provider with base URL:', baseUrl);
     config.models = config.models || {};
     config.models.providers = config.models.providers || {};
     config.models.providers.openai = {
@@ -228,14 +233,22 @@ if (isOpenAI) {
             { id: 'gpt-5.2', name: 'GPT-5.2', contextWindow: 200000 },
             { id: 'gpt-5', name: 'GPT-5', contextWindow: 200000 },
             { id: 'gpt-4.5-preview', name: 'GPT-4.5 Preview', contextWindow: 128000 },
+            { id: 'gemini-2.0-flash', name: 'Gemini 2.0 Flash', contextWindow: 1000000 },
+            { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro', contextWindow: 1000000 },
         ]
     };
+    // Include API key if set (for AI Gateway auth)
+    if (process.env.AI_GATEWAY_API_KEY) {
+        config.models.providers.openai.apiKey = process.env.AI_GATEWAY_API_KEY;
+    }
     // Add models to the allowlist so they appear in /models
     config.agents.defaults.models = config.agents.defaults.models || {};
     config.agents.defaults.models['openai/gpt-5.2'] = { alias: 'GPT-5.2' };
     config.agents.defaults.models['openai/gpt-5'] = { alias: 'GPT-5' };
     config.agents.defaults.models['openai/gpt-4.5-preview'] = { alias: 'GPT-4.5' };
-    config.agents.defaults.model.primary = 'openai/gpt-5.2';
+    config.agents.defaults.models['openai/gemini-2.0-flash'] = { alias: 'Gemini Flash' };
+    config.agents.defaults.models['openai/gemini-2.5-pro'] = { alias: 'Gemini Pro' };
+    config.agents.defaults.model.primary = 'openai/gemini-2.0-flash';
 } else if (baseUrl) {
     console.log('Configuring Anthropic provider with base URL:', baseUrl);
     config.models = config.models || {};
