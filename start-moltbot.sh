@@ -121,8 +121,7 @@ config.agents.defaults.model = config.agents.defaults.model || {};
 config.gateway = config.gateway || {};
 config.channels = config.channels || {};
 
-// Clean up any broken anthropic provider config from previous runs
-// (older versions didn't include required 'name' field)
+// Clean up any broken provider configs from previous runs
 if (config.models?.providers?.anthropic?.models) {
     const hasInvalidModels = config.models.providers.anthropic.models.some(m => !m.name);
     if (hasInvalidModels) {
@@ -130,8 +129,6 @@ if (config.models?.providers?.anthropic?.models) {
         delete config.models.providers.anthropic;
     }
 }
-
-
 
 // Gateway configuration
 config.gateway.port = 18789;
@@ -182,6 +179,12 @@ if (process.env.SLACK_BOT_TOKEN && process.env.SLACK_APP_TOKEN) {
 //   https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_id}/openai
 //   https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_id}/compat
 const baseUrl = (process.env.AI_GATEWAY_BASE_URL || process.env.ANTHROPIC_BASE_URL || '').replace(/\/+$/, '');
+const apiKey = process.env.AI_GATEWAY_API_KEY || process.env.OPENAI_API_KEY || '';
+
+// Debug logging
+console.log('AI_GATEWAY_BASE_URL:', baseUrl || '(not set)');
+console.log('AI_GATEWAY_API_KEY:', apiKey ? apiKey.substring(0, 10) + '...' : '(not set)');
+
 // Check for OpenAI-compatible endpoints: /openai or /compat (unified API)
 const isOpenAICompat = baseUrl.endsWith('/openai') || baseUrl.endsWith('/compat');
 
@@ -191,6 +194,14 @@ if (isOpenAICompat) {
     console.log('Configuring OpenAI-compatible provider with base URL:', baseUrl);
     config.models = config.models || {};
     config.models.providers = config.models.providers || {};
+    
+    // IMPORTANT: Remove any conflicting anthropic provider config when using /compat
+    // This prevents config merge issues from previous runs
+    if (config.models.providers.anthropic) {
+        console.log('Removing conflicting anthropic provider (using /compat endpoint)');
+        delete config.models.providers.anthropic;
+    }
+    
     config.models.providers.openai = {
         baseUrl: baseUrl,
         api: 'openai-responses',
@@ -205,11 +216,19 @@ if (isOpenAICompat) {
         ]
     };
     // Include API key if set (for AI Gateway auth - can be CF API token or provider key)
-    if (process.env.AI_GATEWAY_API_KEY) {
-        config.models.providers.openai.apiKey = process.env.AI_GATEWAY_API_KEY;
+    if (apiKey) {
+        config.models.providers.openai.apiKey = apiKey;
+        console.log('OpenAI provider configured with API key');
+    } else {
+        console.warn('WARNING: No API key set for OpenAI provider!');
     }
     // Add models to the allowlist so they appear in /models
     config.agents.defaults.models = config.agents.defaults.models || {};
+    // Remove any old anthropic model aliases
+    delete config.agents.defaults.models['anthropic/claude-opus-4-5-20251101'];
+    delete config.agents.defaults.models['anthropic/claude-sonnet-4-5-20250929'];
+    delete config.agents.defaults.models['anthropic/claude-haiku-4-5-20251001'];
+    // Add Gemini/OpenAI model aliases
     config.agents.defaults.models['openai/google-ai-studio/gemini-2.0-flash'] = { alias: 'Gemini 2.0 Flash' };
     config.agents.defaults.models['openai/google-ai-studio/gemini-2.5-flash'] = { alias: 'Gemini 2.5 Flash' };
     config.agents.defaults.models['openai/google-ai-studio/gemini-2.5-pro'] = { alias: 'Gemini 2.5 Pro' };
@@ -221,6 +240,13 @@ if (isOpenAICompat) {
     console.log('Configuring Anthropic provider with base URL:', baseUrl);
     config.models = config.models || {};
     config.models.providers = config.models.providers || {};
+    
+    // Remove any conflicting openai provider config when using anthropic endpoint
+    if (config.models.providers.openai) {
+        console.log('Removing conflicting openai provider (using anthropic endpoint)');
+        delete config.models.providers.openai;
+    }
+    
     const providerConfig = {
         baseUrl: baseUrl,
         api: 'anthropic-messages',
@@ -243,13 +269,14 @@ if (isOpenAICompat) {
     config.agents.defaults.model.primary = 'anthropic/claude-opus-4-5-20251101';
 } else {
     // Default to Anthropic without custom base URL (uses built-in pi-ai catalog)
+    console.log('No base URL configured, using default Anthropic provider');
     config.agents.defaults.model.primary = 'anthropic/claude-opus-4-5';
 }
 
 // Write updated config
 fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
 console.log('Configuration updated successfully');
-console.log('Config:', JSON.stringify(config, null, 2));
+console.log('Final config:', JSON.stringify(config, null, 2));
 EOFNODE
 
 # ============================================================
