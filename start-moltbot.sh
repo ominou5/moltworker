@@ -218,11 +218,11 @@ if (process.env.SLACK_BOT_TOKEN && process.env.SLACK_APP_TOKEN) {
 //   https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_id}/compat
 const baseUrl = (process.env.AI_GATEWAY_BASE_URL || process.env.ANTHROPIC_BASE_URL || '').replace(/\/+$/, '');
 // Check for OpenAI-compatible endpoints: /openai or /compat (unified API)
-const isOpenAI = baseUrl.endsWith('/openai') || baseUrl.endsWith('/compat');
+const isOpenAICompat = baseUrl.endsWith('/openai') || baseUrl.endsWith('/compat');
 
-if (isOpenAI) {
+if (isOpenAICompat) {
     // Create custom openai provider config with baseUrl override
-    // Omit apiKey so moltbot falls back to OPENAI_API_KEY env var
+    // For Cloudflare AI Gateway /compat endpoint, use google-ai-studio model prefix for Gemini
     console.log('Configuring OpenAI-compatible provider with base URL:', baseUrl);
     config.models = config.models || {};
     config.models.providers = config.models.providers || {};
@@ -230,25 +230,28 @@ if (isOpenAI) {
         baseUrl: baseUrl,
         api: 'openai-responses',
         models: [
-            { id: 'gpt-5.2', name: 'GPT-5.2', contextWindow: 200000 },
-            { id: 'gpt-5', name: 'GPT-5', contextWindow: 200000 },
-            { id: 'gpt-4.5-preview', name: 'GPT-4.5 Preview', contextWindow: 128000 },
-            { id: 'gemini-2.0-flash', name: 'Gemini 2.0 Flash', contextWindow: 1000000 },
-            { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro', contextWindow: 1000000 },
+            // Gemini models via AI Gateway (use google-ai-studio prefix)
+            { id: 'google-ai-studio/gemini-2.0-flash', name: 'Gemini 2.0 Flash', contextWindow: 1000000 },
+            { id: 'google-ai-studio/gemini-2.5-flash', name: 'Gemini 2.5 Flash', contextWindow: 1000000 },
+            { id: 'google-ai-studio/gemini-2.5-pro', name: 'Gemini 2.5 Pro', contextWindow: 1000000 },
+            // OpenAI models (if available via gateway)
+            { id: 'gpt-4o', name: 'GPT-4o', contextWindow: 128000 },
+            { id: 'gpt-4o-mini', name: 'GPT-4o Mini', contextWindow: 128000 },
         ]
     };
-    // Include API key if set (for AI Gateway auth)
+    // Include API key if set (for AI Gateway auth - can be CF API token or provider key)
     if (process.env.AI_GATEWAY_API_KEY) {
         config.models.providers.openai.apiKey = process.env.AI_GATEWAY_API_KEY;
     }
     // Add models to the allowlist so they appear in /models
     config.agents.defaults.models = config.agents.defaults.models || {};
-    config.agents.defaults.models['openai/gpt-5.2'] = { alias: 'GPT-5.2' };
-    config.agents.defaults.models['openai/gpt-5'] = { alias: 'GPT-5' };
-    config.agents.defaults.models['openai/gpt-4.5-preview'] = { alias: 'GPT-4.5' };
-    config.agents.defaults.models['openai/gemini-2.0-flash'] = { alias: 'Gemini Flash' };
-    config.agents.defaults.models['openai/gemini-2.5-pro'] = { alias: 'Gemini Pro' };
-    config.agents.defaults.model.primary = 'openai/gemini-2.0-flash';
+    config.agents.defaults.models['openai/google-ai-studio/gemini-2.0-flash'] = { alias: 'Gemini 2.0 Flash' };
+    config.agents.defaults.models['openai/google-ai-studio/gemini-2.5-flash'] = { alias: 'Gemini 2.5 Flash' };
+    config.agents.defaults.models['openai/google-ai-studio/gemini-2.5-pro'] = { alias: 'Gemini 2.5 Pro' };
+    config.agents.defaults.models['openai/gpt-4o'] = { alias: 'GPT-4o' };
+    config.agents.defaults.models['openai/gpt-4o-mini'] = { alias: 'GPT-4o Mini' };
+    // Set Gemini as default primary model
+    config.agents.defaults.model.primary = 'openai/google-ai-studio/gemini-2.0-flash';
 } else if (baseUrl) {
     console.log('Configuring Anthropic provider with base URL:', baseUrl);
     config.models = config.models || {};
