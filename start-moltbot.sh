@@ -1,17 +1,18 @@
 #!/bin/bash
-# Startup script for Moltbot in Cloudflare Sandbox
+# Startup script for OpenClaw/Moltbot in Cloudflare Sandbox
 # This script:
 # 1. Restores config from R2 backup if available
-# 2. Configures moltbot from environment variables
-# 3. Starts a background sync to backup config to R2
-# 4. Starts the gateway
+# 2. Configures OpenClaw from environment variables
+# 3. Starts the gateway
+#
+# Updated for OpenClaw 2026.2.3+ with native Cloudflare AI Gateway support
 
 set -e
 
 # Check if clawdbot gateway is already running - bail early if so
 # Note: CLI is still named "clawdbot" until upstream renames it
 if pgrep -f "clawdbot gateway" > /dev/null 2>&1; then
-    echo "Moltbot gateway is already running, exiting."
+    echo "OpenClaw gateway is already running, exiting."
     exit 0
 fi
 
@@ -100,6 +101,7 @@ fi
 # CONFIGURE FROM ENVIRONMENT VARIABLES
 # ============================================================
 # This runs on every startup to ensure env vars take precedence
+# Uses OpenClaw 2026.2.3+ native Cloudflare AI Gateway provider
 
 node << EOFNODE
 const fs = require('fs');
@@ -120,15 +122,8 @@ config.agents.defaults = config.agents.defaults || {};
 config.agents.defaults.model = config.agents.defaults.model || {};
 config.gateway = config.gateway || {};
 config.channels = config.channels || {};
-
-// Clean up any broken provider configs from previous runs
-if (config.models?.providers?.anthropic?.models) {
-    const hasInvalidModels = config.models.providers.anthropic.models.some(m => !m.name);
-    if (hasInvalidModels) {
-        console.log('Removing broken anthropic provider config (missing model names)');
-        delete config.models.providers.anthropic;
-    }
-}
+config.models = config.models || {};
+config.models.providers = config.models.providers || {};
 
 // Gateway configuration
 config.gateway.port = 18789;
@@ -173,103 +168,85 @@ if (process.env.SLACK_BOT_TOKEN && process.env.SLACK_APP_TOKEN) {
     config.channels.slack.enabled = true;
 }
 
-// Base URL override (e.g., for Cloudflare AI Gateway)
-// Usage: Set AI_GATEWAY_BASE_URL or ANTHROPIC_BASE_URL to your endpoint like:
-//   https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_id}/anthropic
-//   https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_id}/openai
-//   https://gateway.ai.cloudflare.com/v1/{account_id}/{gateway_id}/compat
-const baseUrl = (process.env.AI_GATEWAY_BASE_URL || process.env.ANTHROPIC_BASE_URL || '').replace(/\/+$/, '');
-const apiKey = process.env.AI_GATEWAY_API_KEY || process.env.OPENAI_API_KEY || '';
+// ============================================================
+// CLOUDFLARE AI GATEWAY CONFIGURATION
+// ============================================================
+// Uses OpenClaw 2026.2.3+ native cloudflare-ai-gateway provider
+//
+// Required environment variables:
+//   CLOUDFLARE_AI_GATEWAY_ACCOUNT_ID - Your Cloudflare account ID
+//   CLOUDFLARE_AI_GATEWAY_GATEWAY_ID - Your AI Gateway ID
+//   CLOUDFLARE_AI_GATEWAY_API_KEY    - Your provider API key (e.g., Gemini key) 
+//                                      stored in Cloudflare Provider Keys
+//   CF_AIG_AUTHORIZATION             - (Optional) Cloudflare API token for 
+//                                      authenticated gateways
+
+const accountId = process.env.CLOUDFLARE_AI_GATEWAY_ACCOUNT_ID || process.env.CF_ACCOUNT_ID;
+const gatewayId = process.env.CLOUDFLARE_AI_GATEWAY_GATEWAY_ID || 'moltbot-gateway';
+const apiKey = process.env.CLOUDFLARE_AI_GATEWAY_API_KEY || process.env.AI_GATEWAY_API_KEY;
+const cfAuthToken = process.env.CF_AIG_AUTHORIZATION;
 
 // Debug logging
-console.log('AI_GATEWAY_BASE_URL:', baseUrl || '(not set)');
-console.log('AI_GATEWAY_API_KEY:', apiKey ? apiKey.substring(0, 10) + '...' : '(not set)');
+console.log('CLOUDFLARE_AI_GATEWAY_ACCOUNT_ID:', accountId || '(not set)');
+console.log('CLOUDFLARE_AI_GATEWAY_GATEWAY_ID:', gatewayId);
+console.log('CLOUDFLARE_AI_GATEWAY_API_KEY:', apiKey ? apiKey.substring(0, 10) + '...' : '(not set)');
+console.log('CF_AIG_AUTHORIZATION:', cfAuthToken ? 'set (hidden)' : '(not set)');
 
-// Check for OpenAI-compatible endpoints: /openai or /compat (unified API)
-const isOpenAICompat = baseUrl.endsWith('/openai') || baseUrl.endsWith('/compat');
-
-if (isOpenAICompat) {
-    // Create custom openai provider config with baseUrl override
-    // For Cloudflare AI Gateway /compat endpoint, use google-ai-studio model prefix for Gemini
-    console.log('Configuring OpenAI-compatible provider with base URL:', baseUrl);
-    config.models = config.models || {};
-    config.models.providers = config.models.providers || {};
+if (accountId && apiKey) {
+    console.log('Configuring native Cloudflare AI Gateway provider...');
     
-    // IMPORTANT: Remove any conflicting anthropic provider config when using /compat
-    // This prevents config merge issues from previous runs
-    if (config.models.providers.anthropic) {
-        console.log('Removing conflicting anthropic provider (using /compat endpoint)');
-        delete config.models.providers.anthropic;
-    }
+    // Clear any legacy provider configs to avoid conflicts
+    delete config.models.providers.anthropic;
+    delete config.models.providers.openai;
     
-    config.models.providers.openai = {
-        baseUrl: baseUrl,
-        api: 'openai-responses',
-        models: [
-            // Gemini models via AI Gateway (use google-ai-studio prefix)
-            { id: 'google-ai-studio/gemini-2.0-flash', name: 'Gemini 2.0 Flash', contextWindow: 1000000 },
-            { id: 'google-ai-studio/gemini-2.5-flash', name: 'Gemini 2.5 Flash', contextWindow: 1000000 },
-            { id: 'google-ai-studio/gemini-2.5-pro', name: 'Gemini 2.5 Pro', contextWindow: 1000000 },
-            // OpenAI models (if available via gateway)
-            { id: 'gpt-4o', name: 'GPT-4o', contextWindow: 128000 },
-            { id: 'gpt-4o-mini', name: 'GPT-4o Mini', contextWindow: 128000 },
-        ]
+    // Configure the native cloudflare-ai-gateway provider
+    config.models.providers['cloudflare-ai-gateway'] = {
+        accountId: accountId,
+        gatewayId: gatewayId,
+        apiKey: apiKey,
     };
-    // Include API key if set (for AI Gateway auth - can be CF API token or provider key)
-    if (apiKey) {
-        config.models.providers.openai.apiKey = apiKey;
-        console.log('OpenAI provider configured with API key');
-    } else {
-        console.warn('WARNING: No API key set for OpenAI provider!');
+    
+    // Add cf-aig-authorization header if provided (for authenticated gateways/BYOK)
+    if (cfAuthToken) {
+        config.models.providers['cloudflare-ai-gateway'].headers = {
+            'cf-aig-authorization': cfAuthToken.startsWith('Bearer ') 
+                ? cfAuthToken 
+                : 'Bearer ' + cfAuthToken
+        };
     }
-    // Add models to the allowlist so they appear in /models
+    
+    // Configure model aliases for Gemini via AI Gateway
     config.agents.defaults.models = config.agents.defaults.models || {};
-    // Remove any old anthropic model aliases
-    delete config.agents.defaults.models['anthropic/claude-opus-4-5-20251101'];
-    delete config.agents.defaults.models['anthropic/claude-sonnet-4-5-20250929'];
-    delete config.agents.defaults.models['anthropic/claude-haiku-4-5-20251001'];
-    // Add Gemini/OpenAI model aliases
-    config.agents.defaults.models['openai/google-ai-studio/gemini-2.0-flash'] = { alias: 'Gemini 2.0 Flash' };
-    config.agents.defaults.models['openai/google-ai-studio/gemini-2.5-flash'] = { alias: 'Gemini 2.5 Flash' };
-    config.agents.defaults.models['openai/google-ai-studio/gemini-2.5-pro'] = { alias: 'Gemini 2.5 Pro' };
-    config.agents.defaults.models['openai/gpt-4o'] = { alias: 'GPT-4o' };
-    config.agents.defaults.models['openai/gpt-4o-mini'] = { alias: 'GPT-4o Mini' };
-    // Set Gemini 2.5 Flash as default primary model
-    config.agents.defaults.model.primary = 'openai/google-ai-studio/gemini-2.5-flash';
-} else if (baseUrl) {
-    console.log('Configuring Anthropic provider with base URL:', baseUrl);
-    config.models = config.models || {};
-    config.models.providers = config.models.providers || {};
     
-    // Remove any conflicting openai provider config when using anthropic endpoint
-    if (config.models.providers.openai) {
-        console.log('Removing conflicting openai provider (using anthropic endpoint)');
-        delete config.models.providers.openai;
-    }
+    // Gemini models via Cloudflare AI Gateway
+    config.agents.defaults.models['cloudflare-ai-gateway/google-ai-studio/gemini-2.0-flash'] = { alias: 'Gemini 2.0 Flash' };
+    config.agents.defaults.models['cloudflare-ai-gateway/google-ai-studio/gemini-2.5-flash'] = { alias: 'Gemini 2.5 Flash' };
+    config.agents.defaults.models['cloudflare-ai-gateway/google-ai-studio/gemini-2.5-pro'] = { alias: 'Gemini 2.5 Pro' };
     
-    const providerConfig = {
-        baseUrl: baseUrl,
-        api: 'anthropic-messages',
-        models: [
-            { id: 'claude-opus-4-5-20251101', name: 'Claude Opus 4.5', contextWindow: 200000 },
-            { id: 'claude-sonnet-4-5-20250929', name: 'Claude Sonnet 4.5', contextWindow: 200000 },
-            { id: 'claude-haiku-4-5-20251001', name: 'Claude Haiku 4.5', contextWindow: 200000 },
-        ]
-    };
-    // Include API key in provider config if set (required when using custom baseUrl)
-    if (process.env.ANTHROPIC_API_KEY) {
-        providerConfig.apiKey = process.env.ANTHROPIC_API_KEY;
-    }
-    config.models.providers.anthropic = providerConfig;
-    // Add models to the allowlist so they appear in /models
+    // Anthropic models via Cloudflare AI Gateway
+    config.agents.defaults.models['cloudflare-ai-gateway/claude-opus-4-5'] = { alias: 'Claude Opus 4.5' };
+    config.agents.defaults.models['cloudflare-ai-gateway/claude-sonnet-4-5'] = { alias: 'Claude Sonnet 4.5' };
+    
+    // OpenAI models via Cloudflare AI Gateway  
+    config.agents.defaults.models['cloudflare-ai-gateway/gpt-4o'] = { alias: 'GPT-4o' };
+    config.agents.defaults.models['cloudflare-ai-gateway/gpt-4o-mini'] = { alias: 'GPT-4o Mini' };
+    
+    // Set default primary model
+    const defaultModel = process.env.DEFAULT_MODEL || 'cloudflare-ai-gateway/google-ai-studio/gemini-2.5-flash';
+    config.agents.defaults.model.primary = defaultModel;
+    console.log('Default model:', defaultModel);
+    
+} else if (process.env.ANTHROPIC_API_KEY) {
+    // Fallback to direct Anthropic if no AI Gateway config
+    console.log('No AI Gateway config, using direct Anthropic provider');
     config.agents.defaults.models = config.agents.defaults.models || {};
     config.agents.defaults.models['anthropic/claude-opus-4-5-20251101'] = { alias: 'Opus 4.5' };
     config.agents.defaults.models['anthropic/claude-sonnet-4-5-20250929'] = { alias: 'Sonnet 4.5' };
     config.agents.defaults.models['anthropic/claude-haiku-4-5-20251001'] = { alias: 'Haiku 4.5' };
     config.agents.defaults.model.primary = 'anthropic/claude-opus-4-5-20251101';
 } else {
-    // Default to Anthropic without custom base URL (uses built-in pi-ai catalog)
-    console.log('No base URL configured, using default Anthropic provider');
+    // Default provider (uses built-in pi-ai catalog)
+    console.log('No API configuration found, using default provider');
     config.agents.defaults.model.primary = 'anthropic/claude-opus-4-5';
 }
 
@@ -283,7 +260,7 @@ EOFNODE
 # START GATEWAY
 # ============================================================
 # Note: R2 backup sync is handled by the Worker's cron trigger
-echo "Starting Moltbot Gateway..."
+echo "Starting OpenClaw Gateway..."
 echo "Gateway will be available on port 18789"
 
 # Clean up stale lock files
