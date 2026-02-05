@@ -47,15 +47,22 @@ export function buildEnvVars(env: MoltbotEnv): Record<string, string> {
   }
 
   // ============================================================
-  // LEGACY AI GATEWAY SUPPORT (for backwards compatibility)
+  // AI GATEWAY BASE URL (Critical for native provider)
   // ============================================================
-  // These are kept for users on older OpenClaw versions
+  // The native cloudflare-ai-gateway provider requires baseUrl
+  // Pass in both legacy and new format
   
   const normalizedBaseUrl = env.AI_GATEWAY_BASE_URL?.replace(/\/+$/, '');
-  const isOpenAIGateway = normalizedBaseUrl?.endsWith('/openai') || normalizedBaseUrl?.endsWith('/compat');
-
+  
   if (normalizedBaseUrl) {
+    // Legacy format
     envVars.AI_GATEWAY_BASE_URL = normalizedBaseUrl;
+    // Native format - REQUIRED for cloudflare-ai-gateway provider
+    envVars.CLOUDFLARE_AI_GATEWAY_BASE_URL = normalizedBaseUrl;
+    
+    // Determine if it's an OpenAI-compatible gateway
+    const isOpenAIGateway = normalizedBaseUrl.endsWith('/openai') || normalizedBaseUrl.endsWith('/compat');
+    
     if (isOpenAIGateway) {
       envVars.OPENAI_BASE_URL = normalizedBaseUrl;
       if (env.AI_GATEWAY_API_KEY) envVars.OPENAI_API_KEY = env.AI_GATEWAY_API_KEY;
@@ -77,6 +84,11 @@ export function buildEnvVars(env: MoltbotEnv): Record<string, string> {
   }
   if (env.ANTHROPIC_BASE_URL && !envVars.ANTHROPIC_BASE_URL) {
     envVars.ANTHROPIC_BASE_URL = env.ANTHROPIC_BASE_URL;
+  }
+  
+  // Pass Gemini API key if set (for Google models via AI Gateway)
+  if (env.GEMINI_API_KEY) {
+    envVars.GEMINI_API_KEY = env.GEMINI_API_KEY;
   }
 
   // ============================================================
