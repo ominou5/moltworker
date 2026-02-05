@@ -11,7 +11,13 @@
  * - Configuration via environment secrets
  *
  * Required secrets (set via `wrangler secret put`):
- * - ANTHROPIC_API_KEY: Your Anthropic API key
+ * - AI_GATEWAY_API_KEY: Provider API key for Cloudflare AI Gateway (e.g., Gemini key)
+ *   OR ANTHROPIC_API_KEY: Direct Anthropic API key (legacy)
+ *
+ * For Cloudflare AI Gateway (recommended):
+ * - CF_ACCOUNT_ID: Your Cloudflare account ID
+ * - AI_GATEWAY_ID: Your AI Gateway ID (e.g., 'moltbot-gateway')
+ * - AI_GATEWAY_API_KEY: Your provider API key (e.g., Gemini key)
  *
  * Optional secrets:
  * - MOLTBOT_GATEWAY_TOKEN: Token to protect gateway access
@@ -38,11 +44,11 @@ function transformErrorMessage(message: string, host: string): string {
   if (message.includes('gateway token missing') || message.includes('gateway token mismatch')) {
     return `Invalid or missing token. Visit https://${host}?token={REPLACE_WITH_YOUR_TOKEN}`;
   }
-  
+
   if (message.includes('pairing required')) {
     return `Pairing required. Visit https://${host}/_admin/`;
   }
-  
+
   return message;
 }
 
@@ -51,6 +57,8 @@ export { Sandbox };
 /**
  * Validate required environment variables.
  * Returns an array of missing variable descriptions, or empty array if all are set.
+ * 
+ * Updated for OpenClaw 2026.2.3+ native Cloudflare AI Gateway support.
  */
 function validateRequiredEnv(env: MoltbotEnv): string[] {
   const missing: string[] = [];
@@ -67,15 +75,14 @@ function validateRequiredEnv(env: MoltbotEnv): string[] {
     missing.push('CF_ACCESS_AUD');
   }
 
-  // Check for AI Gateway or direct Anthropic configuration
-  if (env.AI_GATEWAY_API_KEY) {
-    // AI Gateway requires both API key and base URL
-    if (!env.AI_GATEWAY_BASE_URL) {
-      missing.push('AI_GATEWAY_BASE_URL (required when using AI_GATEWAY_API_KEY)');
-    }
-  } else if (!env.ANTHROPIC_API_KEY) {
-    // Direct Anthropic access requires API key
-    missing.push('ANTHROPIC_API_KEY or AI_GATEWAY_API_KEY');
+  // Check for AI provider configuration
+  // Priority: Native AI Gateway > Legacy AI Gateway > Direct Anthropic
+  const hasNativeAIGateway = env.CF_ACCOUNT_ID && (env.AI_GATEWAY_ID || env.AI_GATEWAY_API_KEY);
+  const hasLegacyAIGateway = env.AI_GATEWAY_API_KEY && env.AI_GATEWAY_BASE_URL;
+  const hasDirectAnthropic = !!env.ANTHROPIC_API_KEY;
+
+  if (!hasNativeAIGateway && !hasLegacyAIGateway && !hasDirectAnthropic) {
+    missing.push('AI provider configuration: Set CF_ACCOUNT_ID + AI_GATEWAY_API_KEY (recommended), or AI_GATEWAY_BASE_URL + AI_GATEWAY_API_KEY (legacy), or ANTHROPIC_API_KEY (direct)');
   }
 
   return missing;
@@ -94,12 +101,12 @@ function validateRequiredEnv(env: MoltbotEnv): string[] {
  */
 function buildSandboxOptions(env: MoltbotEnv): SandboxOptions {
   const sleepAfter = env.SANDBOX_SLEEP_AFTER?.toLowerCase() || 'never';
-  
+
   // 'never' means keep the container alive indefinitely
   if (sleepAfter === 'never') {
     return { keepAlive: true };
   }
-  
+
   // Otherwise, use the specified duration
   return { sleepAfter };
 }
@@ -115,7 +122,11 @@ const app = new Hono<AppEnv>();
 app.use('*', async (c, next) => {
   const url = new URL(c.req.url);
   console.log(`[REQ] ${c.req.method} ${url.pathname}${url.search}`);
-  console.log(`[REQ] Has ANTHROPIC_API_KEY: ${!!c.env.ANTHROPIC_API_KEY}`);
+  // Updated logging for native AI Gateway support
+  const hasNativeGateway = !!(c.env.CF_ACCOUNT_ID && (c.env.AI_GATEWAY_ID || c.env.AI_GATEWAY_API_KEY));
+  const hasLegacyGateway = !!(c.env.AI_GATEWAY_API_KEY && c.env.AI_GATEWAY_BASE_URL);
+  const hasDirectAnthropic = !!c.env.ANTHROPIC_API_KEY;
+  console.log(`[REQ] AI Config: native=${hasNativeGateway}, legacy=${hasLegacyGateway}, anthropic=${hasDirectAnthropic}`);
   console.log(`[REQ] DEV_MODE: ${c.env.DEV_MODE}`);
   console.log(`[REQ] DEBUG_ROUTES: ${c.env.DEBUG_ROUTES}`);
   await next();
@@ -147,28 +158,28 @@ app.route('/cdp', cdp);
 // Middleware: Validate required environment variables (skip in dev mode and for debug routes)
 app.use('*', async (c, next) => {
   const url = new URL(c.req.url);
-  
+
   // Skip validation for debug routes (they have their own enable check)
   if (url.pathname.startsWith('/debug')) {
     return next();
   }
-  
+
   // Skip validation in dev mode
   if (c.env.DEV_MODE === 'true') {
     return next();
   }
-  
+
   const missingVars = validateRequiredEnv(c.env);
   if (missingVars.length > 0) {
     console.error('[CONFIG] Missing required environment variables:', missingVars.join(', '));
-    
+
     const acceptsHtml = c.req.header('Accept')?.includes('text/html');
     if (acceptsHtml) {
       // Return a user-friendly HTML error page
       const html = configErrorHtml.replace('{{MISSING_VARS}}', missingVars.join(', '));
       return c.html(html, 503);
     }
-    
+
     // Return JSON error for API requests
     return c.json({
       error: 'Configuration error',
@@ -177,7 +188,7 @@ app.use('*', async (c, next) => {
       hint: 'Set these using: wrangler secret put <VARIABLE_NAME>',
     }, 503);
   }
-  
+
   return next();
 });
 
@@ -189,7 +200,7 @@ app.use('*', async (c, next) => {
     type: acceptsHtml ? 'html' : 'json',
     redirectOnMissing: acceptsHtml 
   });
-  
+
   return middleware(c, next);
 });
 
@@ -222,21 +233,21 @@ app.all('*', async (c) => {
   // Check if gateway is already running
   const existingProcess = await findExistingMoltbotProcess(sandbox);
   const isGatewayReady = existingProcess !== null && existingProcess.status === 'running';
-  
+
   // For browser requests (non-WebSocket, non-API), show loading page if gateway isn't ready
   const isWebSocketRequest = request.headers.get('Upgrade')?.toLowerCase() === 'websocket';
   const acceptsHtml = request.headers.get('Accept')?.includes('text/html');
-  
+
   if (!isGatewayReady && !isWebSocketRequest && acceptsHtml) {
     console.log('[PROXY] Gateway not ready, serving loading page');
-    
+
     // Start the gateway in the background (don't await)
     c.executionCtx.waitUntil(
       ensureMoltbotGateway(sandbox, c.env).catch((err: Error) => {
         console.error('[PROXY] Background gateway start failed:', err);
       })
     );
-    
+
     // Return the loading page immediately
     return c.html(loadingPageHtml);
   }
@@ -248,85 +259,68 @@ app.all('*', async (c) => {
     console.error('[PROXY] Failed to start Moltbot:', error);
     const errorMessage = error instanceof Error ? error.message : 'Unknown error';
 
+    // Provide helpful hints based on configuration
     let hint = 'Check worker logs with: wrangler tail';
-    if (!c.env.ANTHROPIC_API_KEY) {
-      hint = 'ANTHROPIC_API_KEY is not set. Run: wrangler secret put ANTHROPIC_API_KEY';
-    } else if (errorMessage.includes('heap out of memory') || errorMessage.includes('OOM')) {
-      hint = 'Gateway ran out of memory. Try again or check for memory leaks.';
+    const hasAnyApiKey = c.env.AI_GATEWAY_API_KEY || c.env.ANTHROPIC_API_KEY;
+    if (!hasAnyApiKey) {
+      hint = 'No API key set. Run: wrangler secret put AI_GATEWAY_API_KEY (or ANTHROPIC_API_KEY)';
     }
 
-    return c.json({
-      error: 'Moltbot gateway failed to start',
-      details: errorMessage,
-      hint,
-    }, 503);
+    if (acceptsHtml) {
+      const originalHtml = configErrorHtml.replace('{{MISSING_VARS}}', errorMessage);
+      return c.html(originalHtml, 500);
+    }
+    return c.json({ error: 'Failed to start Moltbot', details: errorMessage, hint }, 500);
   }
 
-  // Proxy to Moltbot with WebSocket message interception
+  // Handle WebSocket upgrades
   if (isWebSocketRequest) {
-    console.log('[WS] Proxying WebSocket connection to Moltbot');
-    console.log('[WS] URL:', request.url);
-    console.log('[WS] Search params:', url.search);
+    console.log('[WS] Intercepting WebSocket for transformation');
     
-    // Get WebSocket connection to the container
-    const containerResponse = await sandbox.wsConnect(request, MOLTBOT_PORT);
-    console.log('[WS] wsConnect response status:', containerResponse.status);
+    // Create WebSocket pair for client
+    const { 0: clientWs, 1: serverWs } = new WebSocketPair();
+    serverWs.accept();
     
-    // Get the container-side WebSocket
-    const containerWs = containerResponse.webSocket;
-    if (!containerWs) {
-      console.error('[WS] No WebSocket in container response - falling back to direct proxy');
-      return containerResponse;
+    // Connect to container WebSocket
+    const containerWsResponse = await sandbox.containerFetch(request, MOLTBOT_PORT);
+    if (!containerWsResponse.webSocket) {
+      console.error('[WS] Container did not return WebSocket');
+      serverWs.close(1011, 'Container WebSocket connection failed');
+      return new Response('WebSocket connection failed', { status: 500 });
     }
     
-    console.log('[WS] Got container WebSocket, setting up interception');
-    
-    // Create a WebSocket pair for the client
-    const [clientWs, serverWs] = Object.values(new WebSocketPair());
-    
-    // Accept both WebSockets
-    serverWs.accept();
+    const containerWs = containerWsResponse.webSocket;
     containerWs.accept();
     
-    console.log('[WS] Both WebSockets accepted');
-    console.log('[WS] containerWs.readyState:', containerWs.readyState);
-    console.log('[WS] serverWs.readyState:', serverWs.readyState);
-    
-    // Relay messages from client to container
-    serverWs.addEventListener('message', (event) => {
-      console.log('[WS] Client -> Container:', typeof event.data, typeof event.data === 'string' ? event.data.slice(0, 200) : '(binary)');
-      if (containerWs.readyState === WebSocket.OPEN) {
-        containerWs.send(event.data);
-      } else {
-        console.log('[WS] Container not open, readyState:', containerWs.readyState);
+    // Forward messages from container to client (with transformation)
+    containerWs.addEventListener('message', (event) => {
+      try {
+        // Try to parse and transform error messages
+        const data = event.data;
+        if (typeof data === 'string' && data.includes('"error"')) {
+          try {
+            const parsed = JSON.parse(data);
+            if (parsed.error && typeof parsed.error === 'string') {
+              parsed.error = transformErrorMessage(parsed.error, new URL(request.url).host);
+              serverWs.send(JSON.stringify(parsed));
+              return;
+            }
+          } catch {
+            // Not JSON, forward as-is
+          }
+        }
+        serverWs.send(data);
+      } catch (e) {
+        console.error('[WS] Error forwarding to client:', e);
       }
     });
     
-    // Relay messages from container to client, with error transformation
-    containerWs.addEventListener('message', (event) => {
-      console.log('[WS] Container -> Client (raw):', typeof event.data, typeof event.data === 'string' ? event.data.slice(0, 500) : '(binary)');
-      let data = event.data;
-      
-      // Try to intercept and transform error messages
-      if (typeof data === 'string') {
-        try {
-          const parsed = JSON.parse(data);
-          console.log('[WS] Parsed JSON, has error.message:', !!parsed.error?.message);
-          if (parsed.error?.message) {
-            console.log('[WS] Original error.message:', parsed.error.message);
-            parsed.error.message = transformErrorMessage(parsed.error.message, url.host);
-            console.log('[WS] Transformed error.message:', parsed.error.message);
-            data = JSON.stringify(parsed);
-          }
-        } catch (e) {
-          console.log('[WS] Not JSON or parse error:', e);
-        }
-      }
-      
-      if (serverWs.readyState === WebSocket.OPEN) {
-        serverWs.send(data);
-      } else {
-        console.log('[WS] Server not open, readyState:', serverWs.readyState);
+    // Forward messages from client to container
+    serverWs.addEventListener('message', (event) => {
+      try {
+        containerWs.send(event.data);
+      } catch (e) {
+        console.error('[WS] Error forwarding to container:', e);
       }
     });
     
@@ -338,13 +332,7 @@ app.all('*', async (c) => {
     
     containerWs.addEventListener('close', (event) => {
       console.log('[WS] Container closed:', event.code, event.reason);
-      // Transform the close reason (truncate to 123 bytes max for WebSocket spec)
-      let reason = transformErrorMessage(event.reason, url.host);
-      if (reason.length > 123) {
-        reason = reason.slice(0, 120) + '...';
-      }
-      console.log('[WS] Transformed close reason:', reason);
-      serverWs.close(event.code, reason);
+      serverWs.close(event.code, event.reason);
     });
     
     // Handle errors
